@@ -13,23 +13,21 @@ const client = new Client({
 
 const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.CLIENT_ID;
-const guildId = process.env.GUILD_ID; // Optional: for faster command registration during development
+const guildId = process.env.GUILD_ID; 
 
-// RCON Configuration - Support multiple servers
+// RCON Configuration
 const parseRconConfigs = () => {
   const configs = [];
   let index = 1;
   
-  // Support both old format (RCON_HOST) and new format (RCON_HOST_1, RCON_HOST_2, etc.)
   if (process.env.RCON_HOST && !process.env.RCON_HOST_1) {
-    // Old single server format
     configs.push({
       host: process.env.RCON_HOST,
       port: process.env.RCON_PORT ? parseInt(process.env.RCON_PORT) : 28016,
       password: process.env.RCON_PASSWORD
     });
   } else {
-    // New multi-server format (RCON_HOST_1, RCON_HOST_2, etc.)
+    // if MULTISERVER
     while (process.env[`RCON_HOST_${index}`]) {
       configs.push({
         host: process.env[`RCON_HOST_${index}`],
@@ -46,7 +44,6 @@ const parseRconConfigs = () => {
 const rconConfigs = parseRconConfigs();
 const groupName = process.env.GROUP_NAME;
 
-// MySQL Database Configuration
 const dbConfig = {
   host: process.env.DB_HOST,
   database: process.env.DB_DATABASE,
@@ -57,10 +54,8 @@ const dbConfig = {
   queueLimit: 0
 };
 
-// Create MySQL connection pool
 const dbPool = mysql.createPool(dbConfig);
 
-// Initialize multiple RCON clients
 const rconClients = [];
 
 rconConfigs.forEach((config, index) => {
@@ -102,7 +97,7 @@ rconConfigs.forEach((config, index) => {
   }
 });
 
-// Helper function to send command to all connected RCON clients
+// HELPER FUNCTION FOR MULTISERVER
 const sendRconCommandToAll = (command) => {
   let sentCount = 0;
   rconClients.forEach((clientInfo) => {
@@ -122,16 +117,15 @@ const sendRconCommandToAll = (command) => {
   return sentCount;
 };
 
-// Register slash commands
 async function registerCommands() {
   const commands = [
     new SlashCommandBuilder()
       .setName('link')
-      .setDescription('Link a string input')
+      .setDescription('Link an input')
       .addStringOption(option =>
         option
           .setName('input')
-          .setDescription('The string input to link (must be exactly 4 characters)')
+          .setDescription('The input to link (must be exactly 4 characters)')
           .setRequired(true)
       )
       .toJSON(),
@@ -153,14 +147,12 @@ async function registerCommands() {
     console.log('Started refreshing application (/) commands.');
 
     if (guildId) {
-      // Register commands to a specific guild (instant update)
       await rest.put(
         Routes.applicationGuildCommands(clientId, guildId),
         { body: commands },
       );
       console.log(`Successfully registered application (/) commands to guild ${guildId}.`);
     } else {
-      // Register commands globally (can take up to 1 hour to propagate)
       await rest.put(
         Routes.applicationCommands(clientId),
         { body: commands },
@@ -173,7 +165,6 @@ async function registerCommands() {
   }
 }
 
-// Handle slash command interactions
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -181,7 +172,6 @@ client.on('interactionCreate', async interaction => {
     const input = interaction.options.getString('input');
     const discordUserId = interaction.user.id;
     
-    // Check if user already has the "Linked" role
     try {
       const member = await interaction.guild.members.fetch(discordUserId);
       const linkedRole = interaction.guild.roles.cache.find(role => role.name === 'Linked');
@@ -195,10 +185,8 @@ client.on('interactionCreate', async interaction => {
       }
     } catch (error) {
       console.error('Error checking user role:', error);
-      // Continue if role check fails (shouldn't block the command)
     }
     
-    // Validate that input is exactly 4 characters
     if (input.length !== 4) {
       await interaction.reply({
         content: `❌ Input must be exactly 4 characters long. You provided ${input.length} character(s).`,
@@ -210,21 +198,18 @@ client.on('interactionCreate', async interaction => {
     try {
       await interaction.deferReply({ ephemeral: true });
       
-      // Check if token exists in discord_link_table
       const [rows] = await dbPool.execute(
         'SELECT * FROM discord_link_table WHERE token = ?',
         [input]
       );
       
       if (rows.length === 0) {
-        // Token not found
         await interaction.editReply({
-          content: `❌ Invalid token. The provided token was not found in the database.`,
+          content: `❌ Invalid token. The provided token does not match.`,
         });
         return;
       }
       
-      // Check if this token is already linked to a different Discord user
       if (rows[0].discord_id && rows[0].discord_id !== discordUserId) {
         await interaction.editReply({
           content: `⚠️ This token is already linked to another Discord account.`,
@@ -232,7 +217,6 @@ client.on('interactionCreate', async interaction => {
         return;
       }
       
-      // Check if this Discord user already has a different token linked
       const [existingLink] = await dbPool.execute(
         'SELECT * FROM discord_link_table WHERE discord_id = ? AND token != ?',
         [discordUserId, input]
@@ -245,15 +229,12 @@ client.on('interactionCreate', async interaction => {
         return;
       }
       
-      // Token found and not linked, update the discord_id column and remove the token
       const [updateResult] = await dbPool.execute(
         'UPDATE discord_link_table SET discord_id = ?, token = NULL WHERE token = ?',
         [discordUserId, input]
       );
       
-      // Only assign role if the database update was successful (discord_id filled and token removed)
       if (updateResult.affectedRows > 0) {
-        // Assign "Linked" role to the user
         try {
           const member = await interaction.guild.members.fetch(discordUserId);
           const role = interaction.guild.roles.cache.find(role => role.name === 'Linked');
@@ -262,20 +243,16 @@ client.on('interactionCreate', async interaction => {
             await member.roles.add(role);
             console.log(`Assigned "Linked" role to user ${discordUserId}`);
             
-            // After role assignment, send RCON command
             try {
-              // Get user_id from the updated row
               const [userRows] = await dbPool.execute(
                 'SELECT user_id FROM discord_link_table WHERE discord_id = ?',
                 [discordUserId]
               );
               
               if (userRows.length > 0 && userRows[0].user_id && groupName) {
-                // Get user_id as string (TEXT column type)
                 const playerId = String(userRows[0].user_id);
                 const rconCommand = `oxide.usergroup add ${playerId} ${groupName}`;
                 
-                // Send command to all connected RCON servers
                 const sentCount = sendRconCommandToAll(rconCommand);
                 if (sentCount === 0) {
                   console.warn('No RCON servers connected, cannot send usergroup command');
@@ -285,20 +262,17 @@ client.on('interactionCreate', async interaction => {
               }
             } catch (rconError) {
               console.error('Error sending RCON command:', rconError);
-              // Continue even if RCON command fails
             }
           } else {
             console.warn(`Role "Linked" not found in server ${interaction.guild.id}`);
           }
         } catch (roleError) {
           console.error('Error assigning role:', roleError);
-          // Continue even if role assignment fails
         }
       }
       
-      // Successfully linked
       await interaction.editReply({
-        content: `✅ Token verified and account linked successfully!`,
+        content: `✅ Token verified, Your account has been linked successfully!`,
       });
     } catch (error) {
       console.error('Database error:', error);
@@ -322,7 +296,6 @@ client.on('interactionCreate', async interaction => {
     try {
       await interaction.deferReply({ ephemeral: false });
       
-      // Send command to all connected RCON servers
       const sentCount = sendRconCommandToAll(command);
       
       if (sentCount > 0) {
@@ -343,36 +316,29 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// Handle guild member remove event (when user leaves the server)
 client.on('guildMemberRemove', async (member) => {
   const discordUserId = member.user.id;
   
   try {
-    // First, get the user_id from the row before deleting
     const [userRows] = await dbPool.execute(
       'SELECT user_id FROM discord_link_table WHERE discord_id = ?',
       [discordUserId]
     );
     
-    // Send RCON command to remove usergroup if user_id exists
     if (userRows.length > 0 && userRows[0].user_id && groupName) {
-      // Get user_id as string (TEXT column type)
       const playerId = String(userRows[0].user_id);
       const rconCommand = `oxide.usergroup remove ${playerId} ${groupName}`;
       
       try {
-        // Send command to all connected RCON servers
         const sentCount = sendRconCommandToAll(rconCommand);
         if (sentCount === 0) {
           console.warn('No RCON servers connected, cannot send usergroup remove command');
         }
       } catch (rconError) {
         console.error('Error sending RCON command:', rconError);
-        // Continue even if RCON command fails
       }
     }
     
-    // Delete the row from discord_link_table that matches the Discord user ID
     const [result] = await dbPool.execute(
       'DELETE FROM discord_link_table WHERE discord_id = ?',
       [discordUserId]
@@ -393,7 +359,6 @@ client.once('ready', async () => {
   console.log(`Bot is ready! Logged in as ${client.user.tag}`);
   registerCommands();
   
-  // Test database connection
   try {
     const connection = await dbPool.getConnection();
     console.log('✅ Database connection established');
@@ -402,7 +367,6 @@ client.once('ready', async () => {
     console.error('❌ Database connection failed:', error.message);
   }
   
-  // Connect to all RCON servers if configured
   if (rconClients.length > 0) {
     rconClients.forEach((clientInfo) => {
       clientInfo.client.login();
@@ -413,7 +377,6 @@ client.once('ready', async () => {
   }
 });
 
-// Login to Discord
 client.login(token);
 
 
