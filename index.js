@@ -658,10 +658,12 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
 
-  // Endpoint to mark a user as executed
-  if (req.method === 'POST' && req.url.startsWith('/api/mark-executed/')) {
+  // Endpoint to mark a user as executed (accepts both GET and POST)
+  if ((req.method === 'GET' || req.method === 'POST') && req.url.startsWith('/api/mark-executed/')) {
     // Extract user_id from URL: /api/mark-executed/{user_id}
     const userId = req.url.split('/api/mark-executed/')[1];
+    
+    console.log(`📝 Mark as executed request for user: ${userId}`);
     
     if (!userId) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -679,11 +681,12 @@ const httpServer = http.createServer(async (req, res) => {
       return;
     }
 
-    // Mark as executed
+    // Mark as executed (update all records for this user_id)
     dbPool.query(`
       UPDATE "rust-server".discord_link_table 
       SET executed = true 
       WHERE user_id = $1
+      AND executed = false
     `, [userId], (err, result) => {
       if (err) {
         console.error('Database error marking as executed:', err);
@@ -692,6 +695,7 @@ const httpServer = http.createServer(async (req, res) => {
         return;
       }
 
+      console.log(`✅ Marked ${result.rowCount} record(s) as executed for user ${userId}`);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, updated: result.rowCount > 0 }));
     });
