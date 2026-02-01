@@ -6,7 +6,7 @@ A Discord bot that syncs Discord accounts with game server accounts (Rust) via R
 
 - 🔗 **Account Linking**: Link Discord accounts to game accounts using 4-character tokens
 - 🎮 **RCON Integration**: Automatically manages user groups on Rust game servers via RCON
-- 👥 **Role Management**: Automatically assigns "Linked" role to verified users
+- 👥 **Role Management**: Automatically assigns "Player Verificado" role to verified users
 - 🔧 **Multi-Server Support**: Connect to multiple RCON servers simultaneously
 - 🗄️ **Database Integration**: Stores and manages account links in MySQL database
 - 🚪 **Auto Cleanup**: Removes user groups when members leave the Discord server
@@ -153,9 +153,9 @@ RCON_PASSWORD=your_rcon_password
      - Select bot permissions: `Manage Roles`, `Send Messages`, `Use Slash Commands`
    - Copy the generated URL and use it to invite your bot to your server
 
-5. **Create the "Linked" Role**
-   - In your Discord server, create a role named exactly `Linked`
-   - Make sure the bot's role is higher in the hierarchy than the "Linked" role
+5. **Create the "Player Verificado" Role**
+   - In your Discord server, create a role named exactly `Player Verificado`
+   - Make sure the bot's role is higher in the hierarchy than the "Player Verificado" role
    - This role will be automatically assigned to users who successfully link their accounts
 
 6. **Get Your Guild ID (Optional)**
@@ -191,7 +191,7 @@ Links your Discord account to a game account using a 4-character token.
   - Token must be exactly 4 characters
   - Each token can only be used once
   - You can only link one account at a time
-  - Automatically assigns the "Linked" role upon successful linking
+  - Automatically assigns the "Player Verificado" role upon successful linking
 
 ## Troubleshooting
 
@@ -220,9 +220,9 @@ Links your Discord account to a game account using a 4-character token.
 - ✅ Ensure bot has `applications.commands` scope when invited
 - ✅ Try restarting the bot
 
-### "Linked" role not assigned
-- ✅ Verify a role named exactly `Linked` exists in your server
-- ✅ Ensure bot's role is higher than "Linked" role in hierarchy
+### "Player Verificado" role not assigned
+- ✅ Verify a role named exactly `Player Verificado` exists in your server
+- ✅ Ensure bot's role is higher than "Player Verificado" role in hierarchy
 - ✅ Check bot has "Manage Roles" permission
 - ✅ Verify bot has "Server Members Intent" enabled
 

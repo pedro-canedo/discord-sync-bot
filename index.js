@@ -184,9 +184,9 @@ client.on('interactionCreate', async interaction => {
     
     try {
       const member = await interaction.guild.members.fetch(discordUserId);
-      const linkedRole = interaction.guild.roles.cache.find(role => role.name === 'Linked');
+      const verifiedRole = interaction.guild.roles.cache.find(role => role.name === 'Player Verificado');
       
-      if (linkedRole && member.roles.cache.has(linkedRole.id)) {
+      if (verifiedRole && member.roles.cache.has(verifiedRole.id)) {
         await interaction.reply({
           content: `❌ Your account is already linked.`,
           flags: MessageFlags.Ephemeral,
@@ -280,11 +280,11 @@ client.on('interactionCreate', async interaction => {
       if (updateResult.rowCount > 0) {
         try {
           const member = await interaction.guild.members.fetch(discordUserId);
-          const role = interaction.guild.roles.cache.find(role => role.name === 'Linked');
+          const role = interaction.guild.roles.cache.find(role => role.name === 'Player Verificado');
           
           if (role) {
             await member.roles.add(role);
-            console.log(`Assigned "Linked" role to user ${discordUserId}`);
+            console.log(`Assigned "Player Verificado" role to user ${discordUserId}`);
             
             try {
               const { rows: userRows } = await dbPool.query(
@@ -292,22 +292,48 @@ client.on('interactionCreate', async interaction => {
                 [discordUserId]
               );
               
-              if (userRows.length > 0 && userRows[0].user_id && groupName) {
+              if (userRows.length > 0 && userRows[0].user_id) {
                 const playerId = String(userRows[0].user_id);
-                const rconCommand = `oxide.usergroup add ${playerId} ${groupName}`;
                 
-                const sentCount = sendRconCommandToAll(rconCommand);
-                if (sentCount === 0) {
-                  console.warn('No RCON servers connected, cannot send usergroup command');
+                // Add user to group if configured
+                if (groupName) {
+                  const rconCommand = `oxide.usergroup add ${playerId} ${groupName}`;
+                  const sentCount = sendRconCommandToAll(rconCommand);
+                  if (sentCount === 0) {
+                    console.warn('No RCON servers connected, cannot send usergroup command');
+                  }
                 }
+                
+                // Grant kit to user
+                const kitCommand = `c.grant user ${playerId} kits.linkdiscord`;
+                const kitSentCount = sendRconCommandToAll(kitCommand);
+                if (kitSentCount === 0) {
+                  console.warn('No RCON servers connected, cannot send kit grant command');
+                } else {
+                  console.log(`✅ Granted kit kits.linkdiscord to user ${playerId}`);
+                }
+                
+                // Send messages to server chat (with delay to ensure kit is granted first)
+                setTimeout(() => {
+                  // First message - congratulations
+                  const chatMessage = `say <color=#4DA6FF>🎉 Parabéns! Um jogador linkou sua conta Discord com sucesso e recebeu acesso ao kit exclusivo!</color>`;
+                  sendRconCommandToAll(chatMessage);
+                  
+                  // Second message - instructions (with delay)
+                  setTimeout(() => {
+                    const instructionMessage = `say <color=#4DA6FF>💬 Obrigado por verificar sua conta! Acesse /kit para pegar suas novidades exclusivas! Outros jogadores também podem linkar suas contas!</color>`;
+                    sendRconCommandToAll(instructionMessage);
+                  }, 1500);
+                }, 500);
+                
               } else {
-                console.warn(`Could not send RCON command: user_id not found or GROUP_NAME not configured`);
+                console.warn(`Could not send RCON command: user_id not found`);
               }
             } catch (rconError) {
               console.error('Error sending RCON command:', rconError);
             }
           } else {
-            console.warn(`Role "Linked" not found in server ${interaction.guild.id}`);
+            console.warn(`Role "Player Verificado" not found in server ${interaction.guild.id}`);
           }
         } catch (roleError) {
           console.error('Error assigning role:', roleError);
