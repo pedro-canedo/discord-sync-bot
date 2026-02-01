@@ -398,14 +398,26 @@ client.once('ready', async () => {
 
 // HTTP server for plugin to insert tokens
 const httpServer = http.createServer(async (req, res) => {
+  // Log ALL incoming requests for debugging
+  console.log(`📥 [${new Date().toISOString()}] ${req.method} ${req.url}`);
+  console.log(`📥 Headers:`, JSON.stringify(req.headers, null, 2));
+  
   // Enable CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, Authorization');
   
   if (req.method === 'OPTIONS') {
+    console.log(`📥 OPTIONS request - sending CORS headers`);
     res.writeHead(200);
     res.end();
+    return;
+  }
+  
+  // Health check endpoint
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
     return;
   }
   
@@ -415,8 +427,12 @@ const httpServer = http.createServer(async (req, res) => {
       body += chunk.toString();
     });
     req.on('end', async () => {
+      // Wrap in try-catch to handle any synchronous errors
       try {
-        console.log(`📥 Received request - Headers:`, JSON.stringify(req.headers, null, 2));
+        console.log(`📥 Received request at ${new Date().toISOString()}`);
+        console.log(`📥 Request URL: ${req.url}`);
+        console.log(`📥 Request method: ${req.method}`);
+        console.log(`📥 Request headers:`, JSON.stringify(req.headers, null, 2));
         console.log(`📥 Request body:`, body);
         
         // Parse body first to check for API key in body (fallback)
@@ -503,28 +519,71 @@ const httpServer = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, inserted: result.rowCount > 0, id: result.rows[0]?.id }));
       } catch (error) {
-        console.error('❌ Error inserting token via API:', error);
+        console.error('❌ ========== ERROR ==========');
+        console.error('❌ Error type:', error.constructor.name);
         console.error('❌ Error name:', error.name);
         console.error('❌ Error message:', error.message);
+        console.error('❌ Error code:', error.code);
+        if (error.detail) console.error('❌ Error detail:', error.detail);
+        if (error.hint) console.error('❌ Error hint:', error.hint);
         if (error.stack) {
           console.error('❌ Error stack:', error.stack);
         }
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ 
-          error: 'Internal server error', 
-          message: error.message,
-          name: error.name
-        }));
+        console.error('❌ Full error object:', JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+        console.error('❌ ==========================');
+        
+        // Make sure we haven't already sent a response
+        if (!res.headersSent) {
+          try {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ 
+              error: 'Internal server error', 
+              message: error.message,
+              name: error.name,
+              code: error.code
+            }));
+          } catch (responseError) {
+            console.error('❌ Failed to send error response:', responseError);
+          }
+        }
       }
     });
   } else {
+    console.log(`📥 404 - Route not found: ${req.url}`);
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
+  }
+  
+  // Handle server errors
+  req.on('error', (err) => {
+    console.error('❌ Request stream error:', err);
+  });
+});
+
+// Handle server-level errors
+httpServer.on('error', (err) => {
+  console.error('❌ HTTP Server error:', err);
+});
+
+httpServer.on('error', (err) => {
+  console.error('❌ HTTP Server error:', err);
+  if (err.code === 'EADDRINUSE') {
+    console.error('❌ Port 3000 is already in use!');
   }
 });
 
 httpServer.listen(3000, '0.0.0.0', () => {
   console.log('🌐 HTTP API server listening on port 3000 (0.0.0.0:3000) for token insertions');
+  console.log('🌐 Server ready to receive requests at: http://0.0.0.0:3000/api/insert-token');
+});
+
+// Handle uncaught errors
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
 client.login(token);
