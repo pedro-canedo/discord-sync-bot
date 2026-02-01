@@ -1,6 +1,7 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, MessageFlags } = require('discord.js');
 const { Client: RconClient } = require('rustrcon');
-const mysql = require('mysql2/promise');
+const { Pool } = require('pg');
+const http = require('http');
 require('dotenv').config();
 
 const client = new Client({
@@ -49,12 +50,13 @@ const dbConfig = {
   database: process.env.DB_DATABASE,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
+  port: process.env.DB_PORT || 5432,
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
 };
 
-const dbPool = mysql.createPool(dbConfig);
+const dbPool = new Pool(dbConfig);
 
 const rconClients = [];
 
@@ -80,8 +82,17 @@ rconConfigs.forEach((config, index) => {
 
     rconClient.on('error', (err) => {
       clientInfo.connected = false;
-      console.error(`RCON #${clientInfo.index} Error:`, err);
-      console.error(`RCON #${clientInfo.index} connection failed. Please verify RCON_HOST_${clientInfo.index}, RCON_PORT_${clientInfo.index}, and RCON_PASSWORD_${clientInfo.index} are correct.`);
+      if (err.error && err.error.code === 'ECONNREFUSED') {
+        console.error(`❌ RCON #${clientInfo.index} connection refused at ${config.host}:${config.port}`);
+        console.error(`   Possíveis causas:`);
+        console.error(`   - Servidor Rust não está rodando`);
+        console.error(`   - RCON não está habilitado no servidor`);
+        console.error(`   - Porta ou IP incorretos`);
+        console.error(`   - Firewall bloqueando a conexão`);
+      } else {
+        console.error(`RCON #${clientInfo.index} Error:`, err);
+        console.error(`RCON #${clientInfo.index} connection failed. Please verify RCON_HOST, RCON_PORT, and RCON_PASSWORD are correct.`);
+      }
     });
 
     rconClient.on('disconnect', () => {
@@ -151,7 +162,15 @@ async function registerCommands() {
       console.log('Note: Global commands can take up to 1 hour to appear. Add GUILD_ID to .env for instant updates.');
     }
   } catch (error) {
-    console.error('Error registering commands:', error);
+    if (error.code === 50001) {
+      console.error('❌ Missing Access: O bot não tem permissão para registrar comandos no servidor.');
+      console.error('   Solução:');
+      console.error('   1. Certifique-se de que o bot foi convidado com a permissão "applications.commands"');
+      console.error('   2. Ou remova o GUILD_ID do .env para registrar comandos globalmente');
+      console.error('   3. Verifique se o bot tem permissões de administrador no servidor');
+    } else {
+      console.error('Error registering commands:', error);
+    }
   }
 }
 
@@ -169,7 +188,7 @@ client.on('interactionCreate', async interaction => {
       if (linkedRole && member.roles.cache.has(linkedRole.id)) {
         await interaction.reply({
           content: `❌ Your account is already linked.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
@@ -180,22 +199,49 @@ client.on('interactionCreate', async interaction => {
     if (input.length !== 4) {
       await interaction.reply({
         content: `❌ Input must be exactly 4 characters long. You provided ${input.length} character(s).`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
     
     try {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       
-      const [rows] = await dbPool.execute(
-        'SELECT * FROM discord_link_table WHERE token = ?',
+      // Ensure table exists in rust-server schema
+      await dbPool.query(`
+        CREATE SCHEMA IF NOT EXISTS "rust-server"
+      `);
+      await dbPool.query(`
+        CREATE TABLE IF NOT EXISTS "rust-server".discord_link_table (
+          id SERIAL PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          discord_id TEXT NOT NULL DEFAULT '',
+          token TEXT
+        )
+      `);
+      
+      // Search for token (case-insensitive)
+      const { rows } = await dbPool.query(
+        'SELECT * FROM "rust-server".discord_link_table WHERE UPPER(token) = UPPER($1)',
         [input]
       );
       
+      console.log(`🔍 Searching for token: ${input} (found ${rows.length} results)`);
+      
       if (rows.length === 0) {
+        // Check if any tokens exist at all for debugging
+        const allTokens = await dbPool.query('SELECT token, user_id, discord_id FROM "rust-server".discord_link_table WHERE token IS NOT NULL ORDER BY id DESC LIMIT 10');
+        console.log(`📋 Recent tokens in database (last 10):`);
+        allTokens.rows.forEach(row => {
+          console.log(`   - Token: ${row.token}, UserID: ${row.user_id}, DiscordID: ${row.discord_id || 'none'}`);
+        });
+        
+        if (allTokens.rows.length === 0) {
+          console.log('⚠️ No tokens found in database. Plugin may not be inserting tokens via HTTP API.');
+        }
+        
         await interaction.editReply({
-          content: `❌ Invalid token. The provided token does not match.`,
+          content: `❌ Invalid token. The provided token does not match.\n\n**Troubleshooting:**\n1. Make sure you used \`/link\` in the game first\n2. Copy the token exactly as shown (case-sensitive)\n3. The token expires after ${process.env.TOKEN_VALID_TIME || 15} minutes\n4. Generate a new token if needed\n5. Check server console for HTTP API connection errors`,
         });
         return;
       }
@@ -207,8 +253,8 @@ client.on('interactionCreate', async interaction => {
         return;
       }
       
-      const [existingLink] = await dbPool.execute(
-        'SELECT * FROM discord_link_table WHERE discord_id = ? AND token != ?',
+      const { rows: existingLink } = await dbPool.query(
+        'SELECT * FROM "rust-server".discord_link_table WHERE discord_id = $1 AND token != $2',
         [discordUserId, input]
       );
       
@@ -219,12 +265,12 @@ client.on('interactionCreate', async interaction => {
         return;
       }
       
-      const [updateResult] = await dbPool.execute(
-        'UPDATE discord_link_table SET discord_id = ?, token = NULL WHERE token = ?',
+      const updateResult = await dbPool.query(
+        'UPDATE "rust-server".discord_link_table SET discord_id = $1, token = NULL WHERE token = $2',
         [discordUserId, input]
       );
       
-      if (updateResult.affectedRows > 0) {
+      if (updateResult.rowCount > 0) {
         try {
           const member = await interaction.guild.members.fetch(discordUserId);
           const role = interaction.guild.roles.cache.find(role => role.name === 'Linked');
@@ -234,8 +280,8 @@ client.on('interactionCreate', async interaction => {
             console.log(`Assigned "Linked" role to user ${discordUserId}`);
             
             try {
-              const [userRows] = await dbPool.execute(
-                'SELECT user_id FROM discord_link_table WHERE discord_id = ?',
+              const { rows: userRows } = await dbPool.query(
+                'SELECT user_id FROM "rust-server".discord_link_table WHERE discord_id = $1',
                 [discordUserId]
               );
               
@@ -277,8 +323,8 @@ client.on('guildMemberRemove', async (member) => {
   const discordUserId = member.user.id;
   
   try {
-    const [userRows] = await dbPool.execute(
-      'SELECT user_id FROM discord_link_table WHERE discord_id = ?',
+    const { rows: userRows } = await dbPool.query(
+      'SELECT user_id FROM "rust-server".discord_link_table WHERE discord_id = $1',
       [discordUserId]
     );
     
@@ -296,12 +342,12 @@ client.on('guildMemberRemove', async (member) => {
       }
     }
     
-    const [result] = await dbPool.execute(
-      'DELETE FROM discord_link_table WHERE discord_id = ?',
+    const result = await dbPool.query(
+      'DELETE FROM "rust-server".discord_link_table WHERE discord_id = $1',
       [discordUserId]
     );
     
-    if (result.affectedRows > 0) {
+    if (result.rowCount > 0) {
       console.log(`Removed linked account for user ${discordUserId} who left the server.`);
     } else {
       console.log(`User ${discordUserId} left the server but had no linked account.`);
@@ -317,9 +363,24 @@ client.once('ready', async () => {
   registerCommands();
   
   try {
-    const connection = await dbPool.getConnection();
+    const client = await dbPool.connect();
     console.log('✅ Database connection established');
-    connection.release();
+    
+    // Create table if it doesn't exist
+    await client.query(`
+        CREATE SCHEMA IF NOT EXISTS "rust-server"
+      `);
+      await dbPool.query(`
+        CREATE TABLE IF NOT EXISTS "rust-server".discord_link_table (
+          id SERIAL PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          discord_id TEXT NOT NULL DEFAULT '',
+          token TEXT
+        )
+      `);
+    console.log('✅ Table rust-server.discord_link_table checked/created');
+    
+    client.release();
   } catch (error) {
     console.error('❌ Database connection failed:', error.message);
   }
@@ -332,6 +393,87 @@ client.once('ready', async () => {
   } else {
     console.log('RCON not configured. Set RCON_HOST, RCON_PORT, and RCON_PASSWORD (or RCON_HOST_1, RCON_PORT_1, RCON_PASSWORD_1, etc.) in .env to enable RCON commands.');
   }
+});
+
+// HTTP server for plugin to insert tokens
+const httpServer = http.createServer(async (req, res) => {
+  // Enable CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200);
+    res.end();
+    return;
+  }
+  
+  if (req.method === 'POST' && req.url === '/api/insert-token') {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString();
+    });
+    req.on('end', async () => {
+      try {
+        console.log(`📥 Received token insertion request: ${body}`);
+        const { user_id, token } = JSON.parse(body);
+        
+        if (!user_id || !token) {
+          console.error('❌ Missing user_id or token in request');
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'user_id and token are required' }));
+          return;
+        }
+
+        // Ensure schema and table exist
+        await dbPool.query(`
+          CREATE SCHEMA IF NOT EXISTS "rust-server"
+        `);
+        await dbPool.query(`
+          CREATE TABLE IF NOT EXISTS "rust-server".discord_link_table (
+            id SERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            discord_id TEXT NOT NULL DEFAULT '',
+            token TEXT
+          )
+        `);
+        
+        // Check if token already exists
+        const existing = await dbPool.query(
+          'SELECT * FROM "rust-server".discord_link_table WHERE token = $1',
+          [token]
+        );
+        
+        if (existing.rows.length > 0) {
+          console.log(`⚠️ Token ${token} already exists in database`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, inserted: false, message: 'Token already exists' }));
+          return;
+        }
+        
+        // Insert token into database
+        const result = await dbPool.query(
+          'INSERT INTO "rust-server".discord_link_table (user_id, token) VALUES ($1, $2) RETURNING id',
+          [user_id, token]
+        );
+
+        console.log(`✅ Token ${token} inserted for user ${user_id}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, inserted: result.rowCount > 0, id: result.rows[0]?.id }));
+      } catch (error) {
+        console.error('❌ Error inserting token via API:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Internal server error', message: error.message }));
+      }
+    });
+  } else {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
+  }
+});
+
+httpServer.listen(3000, '0.0.0.0', () => {
+  console.log('🌐 HTTP API server listening on port 3000 (0.0.0.0:3000) for token insertions');
 });
 
 client.login(token);

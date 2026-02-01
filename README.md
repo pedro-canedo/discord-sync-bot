@@ -17,7 +17,7 @@ Before setting up the bot, make sure you have:
 
 - **Node.js** (v16 or higher recommended)
 - **npm** (comes with Node.js)
-- **MySQL** database server
+- **PostgreSQL** database server
 - **Discord Bot Token** (from Discord Developer Portal)
 - **RCON Access** to your Rust game server(s)
 - A Discord server where you have administrator permissions
@@ -98,11 +98,12 @@ DISCORD_TOKEN=your_discord_bot_token_here
 CLIENT_ID=your_discord_bot_client_id_here
 GUILD_ID=your_discord_server_id_here
 
-# Database Configuration
-DB_HOST=localhost
-DB_DATABASE=your_database_name
-DB_USER=your_database_user
-DB_PASSWORD=your_database_password
+# Database Configuration (PostgreSQL)
+DB_HOST=72.60.250.76
+DB_PORT=5432
+DB_DATABASE=postgres
+DB_USER=postgres
+DB_PASSWORD=zO91TtiMVHNO9h731kFNtxz7eobBarhW
 
 # Oxide User Group (automatically assigned when users link)
 GROUP_NAME=your_group_name
@@ -201,9 +202,10 @@ Links your Discord account to a game account using a 4-character token.
 
 ### Database connection fails
 - ✅ Verify database credentials in `.env`
-- ✅ Ensure MySQL server is running
+- ✅ Ensure PostgreSQL server is running
 - ✅ Check that the database and table exist
 - ✅ Verify database user has proper permissions
+- ✅ Check firewall settings if connecting to remote PostgreSQL server
 
 ### RCON connection fails
 - ✅ Verify RCON credentials in `.env`
