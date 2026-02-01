@@ -1,5 +1,4 @@
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, MessageFlags } = require('discord.js');
-const { Client: RconClient } = require('rustrcon');
 const { Pool } = require('pg');
 const http = require('http');
 require('dotenv').config();
@@ -16,34 +15,6 @@ const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.CLIENT_ID;
 const guildId = process.env.GUILD_ID; 
 
-// RCON Configuration
-const parseRconConfigs = () => {
-  const configs = [];
-  let index = 1;
-  
-  if (process.env.RCON_HOST && !process.env.RCON_HOST_1) {
-    configs.push({
-      host: process.env.RCON_HOST,
-      port: process.env.RCON_PORT ? parseInt(process.env.RCON_PORT) : 28016,
-      password: process.env.RCON_PASSWORD
-    });
-  } else {
-    // if MULTISERVER
-    while (process.env[`RCON_HOST_${index}`]) {
-      configs.push({
-        host: process.env[`RCON_HOST_${index}`],
-        port: process.env[`RCON_PORT_${index}`] ? parseInt(process.env[`RCON_PORT_${index}`]) : 28016,
-        password: process.env[`RCON_PASSWORD_${index}`]
-      });
-      index++;
-    }
-  }
-  
-  return configs;
-};
-
-const rconConfigs = parseRconConfigs();
-const groupName = process.env.GROUP_NAME;
 const apiSecretKey = process.env.API_SECRET_KEY;
 
 const dbConfig = {
@@ -58,76 +29,6 @@ const dbConfig = {
 };
 
 const dbPool = new Pool(dbConfig);
-
-const rconClients = [];
-
-rconConfigs.forEach((config, index) => {
-  if (config.host && config.password) {
-    const rconClient = new RconClient({
-      ip: config.host,
-      port: config.port,
-      password: config.password
-    });
-
-    const clientInfo = {
-      client: rconClient,
-      config: config,
-      connected: false,
-      index: index + 1
-    };
-
-    rconClient.on('connected', () => {
-      clientInfo.connected = true;
-      console.log(`Connected to RCON #${clientInfo.index} at ${config.host}:${config.port}`);
-    });
-
-    rconClient.on('error', (err) => {
-      clientInfo.connected = false;
-      if (err.error && err.error.code === 'ECONNREFUSED') {
-        console.error(`❌ RCON #${clientInfo.index} connection refused at ${config.host}:${config.port}`);
-        console.error(`   Possíveis causas:`);
-        console.error(`   - Servidor Rust não está rodando`);
-        console.error(`   - RCON não está habilitado no servidor`);
-        console.error(`   - Porta ou IP incorretos`);
-        console.error(`   - Firewall bloqueando a conexão`);
-      } else {
-        console.error(`RCON #${clientInfo.index} Error:`, err);
-        console.error(`RCON #${clientInfo.index} connection failed. Please verify RCON_HOST, RCON_PORT, and RCON_PASSWORD are correct.`);
-      }
-    });
-
-    rconClient.on('disconnect', () => {
-      clientInfo.connected = false;
-      console.log(`Disconnected from RCON #${clientInfo.index}`);
-    });
-
-    rconClient.on('message', (message) => {
-      console.log(`RCON #${clientInfo.index} Message:`, message);
-    });
-
-    rconClients.push(clientInfo);
-  }
-});
-
-// HELPER FUNCTION FOR MULTISERVER
-const sendRconCommandToAll = (command) => {
-  let sentCount = 0;
-  rconClients.forEach((clientInfo) => {
-    try {
-      const isConnected = clientInfo.connected || 
-        (clientInfo.client.ws && clientInfo.client.ws.ws && clientInfo.client.ws.ws.readyState === 1);
-      
-      if (isConnected) {
-        clientInfo.client.send(command, 'DiscordBot', 1);
-        console.log(`Sent RCON command to server #${clientInfo.index}: ${command}`);
-        sentCount++;
-      }
-    } catch (error) {
-      console.error(`Error sending RCON command to server #${clientInfo.index}:`, error);
-    }
-  });
-  return sentCount;
-};
 
 async function registerCommands() {
   const commands = [
@@ -336,64 +237,21 @@ client.on('interactionCreate', async interaction => {
           if (role) {
             await member.roles.add(role);
             console.log(`Assigned "Player Verificado" role to user ${discordUserId}`);
-            
-            try {
-              const { rows: userRows } = await dbPool.query(
-                'SELECT user_id FROM "rust-server".discord_link_table WHERE discord_id = $1',
-                [discordUserId]
-              );
-              
-              if (userRows.length > 0 && userRows[0].user_id) {
-                const playerId = String(userRows[0].user_id);
-                
-                // Add user to group if configured
-                if (groupName) {
-                  const rconCommand = `oxide.usergroup add ${playerId} ${groupName}`;
-                  const sentCount = sendRconCommandToAll(rconCommand);
-                  if (sentCount === 0) {
-                    console.warn('No RCON servers connected, cannot send usergroup command');
-                  }
-                }
-                
-                // Grant kit to user
-                const kitCommand = `c.grant user ${playerId} kits.linkdiscord`;
-                const kitSentCount = sendRconCommandToAll(kitCommand);
-                if (kitSentCount === 0) {
-                  console.warn('No RCON servers connected, cannot send kit grant command');
-                } else {
-                  console.log(`✅ Granted kit kits.linkdiscord to user ${playerId}`);
-                }
-                
-                // Send messages to server chat (with delay to ensure kit is granted first)
-                setTimeout(() => {
-                  // First message - congratulations
-                  const chatMessage = `say <color=#4DA6FF>🎉 Parabéns! Um jogador linkou sua conta Discord com sucesso e recebeu acesso ao kit exclusivo!</color>`;
-                  sendRconCommandToAll(chatMessage);
-                  
-                  // Second message - instructions (with delay)
-                  setTimeout(() => {
-                    const instructionMessage = `say <color=#4DA6FF>💬 Obrigado por verificar sua conta! Acesse /kit para pegar suas novidades exclusivas! Outros jogadores também podem linkar suas contas!</color>`;
-                    sendRconCommandToAll(instructionMessage);
-                  }, 1500);
-                }, 500);
-                
-              } else {
-                console.warn(`Could not send RCON command: user_id not found`);
-              }
-            } catch (rconError) {
-              console.error('Error sending RCON command:', rconError);
-            }
           } else {
             console.warn(`Role "Player Verificado" not found in server ${interaction.guild.id}`);
           }
         } catch (roleError) {
           console.error('Error assigning role:', roleError);
         }
+        
+        await interaction.editReply({
+          content: `✅ Token verificado! Sua conta foi linkada com sucesso!\n\n🎮 **Próximo passo:**\nVolte ao jogo e execute o comando:\n\`\`\`/check\`\`\`\n\nIsso irá validar sua conta e conceder seus benefícios!`,
+        });
+      } else {
+        await interaction.editReply({
+          content: `❌ Falha ao linkar conta. Por favor, tente novamente ou entre em contato com o suporte.`,
+        });
       }
-      
-      await interaction.editReply({
-        content: `✅ Token verified, Your account has been linked successfully!`,
-      });
     } catch (error) {
       console.error('Database error:', error);
       await interaction.editReply({
@@ -411,20 +269,6 @@ client.on('guildMemberRemove', async (member) => {
       'SELECT user_id FROM "rust-server".discord_link_table WHERE discord_id = $1',
       [discordUserId]
     );
-    
-    if (userRows.length > 0 && userRows[0].user_id && groupName) {
-      const playerId = String(userRows[0].user_id);
-      const rconCommand = `oxide.usergroup remove ${playerId} ${groupName}`;
-      
-      try {
-        const sentCount = sendRconCommandToAll(rconCommand);
-        if (sentCount === 0) {
-          console.warn('No RCON servers connected, cannot send usergroup remove command');
-        }
-      } catch (rconError) {
-        console.error('Error sending RCON command:', rconError);
-      }
-    }
     
     const result = await dbPool.query(
       'DELETE FROM "rust-server".discord_link_table WHERE discord_id = $1',
@@ -528,15 +372,6 @@ client.once('ready', async () => {
     client.release();
   } catch (error) {
     console.error('❌ Database connection failed:', error.message);
-  }
-  
-  if (rconClients.length > 0) {
-    rconClients.forEach((clientInfo) => {
-      clientInfo.client.login();
-    });
-    console.log(`Connecting to ${rconClients.length} RCON server(s)...`);
-  } else {
-    console.log('RCON not configured. Set RCON_HOST, RCON_PORT, and RCON_PASSWORD (or RCON_HOST_1, RCON_PORT_1, RCON_PASSWORD_1, etc.) in .env to enable RCON commands.');
   }
 });
 
@@ -762,6 +597,103 @@ const httpServer = http.createServer(async (req, res) => {
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, tokens: tokens }));
+    });
+    return;
+  }
+
+  // Endpoint to check if a user_id has been linked
+  if (req.method === 'GET' && req.url.startsWith('/api/check-link/')) {
+    // Extract user_id from URL: /api/check-link/{user_id}
+    const userId = req.url.split('/api/check-link/')[1];
+    
+    if (!userId) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'user_id is required' }));
+      return;
+    }
+
+    // Check API key
+    const authHeader = req.headers['x-api-key'] || req.headers['authorization'];
+    const providedKey = authHeader?.replace('Bearer ', '') || authHeader;
+    
+    if (!providedKey || providedKey !== apiSecretKey) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized: Invalid API key' }));
+      return;
+    }
+
+    // Query for linked account
+    dbPool.query(`
+      SELECT user_id, discord_id, linked_at, executed
+      FROM "rust-server".discord_link_table 
+      WHERE user_id = $1 
+      AND discord_id IS NOT NULL 
+      AND discord_id != ''
+      AND linked_at IS NOT NULL
+    `, [userId], (err, result) => {
+      if (err) {
+        console.error('Database error checking link:', err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Database error', message: err.message }));
+        return;
+      }
+
+      if (result.rows.length === 0) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, linked: false, message: 'Account not linked yet' }));
+        return;
+      }
+
+      const linkData = result.rows[0];
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ 
+        success: true, 
+        linked: true,
+        user_id: linkData.user_id,
+        discord_id: linkData.discord_id,
+        linked_at: linkData.linked_at,
+        executed: linkData.executed
+      }));
+    });
+    return;
+  }
+
+  // Endpoint to mark a user as executed
+  if (req.method === 'POST' && req.url.startsWith('/api/mark-executed/')) {
+    // Extract user_id from URL: /api/mark-executed/{user_id}
+    const userId = req.url.split('/api/mark-executed/')[1];
+    
+    if (!userId) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'user_id is required' }));
+      return;
+    }
+
+    // Check API key
+    const authHeader = req.headers['x-api-key'] || req.headers['authorization'];
+    const providedKey = authHeader?.replace('Bearer ', '') || authHeader;
+    
+    if (!providedKey || providedKey !== apiSecretKey) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized: Invalid API key' }));
+      return;
+    }
+
+    // Mark as executed
+    dbPool.query(`
+      UPDATE "rust-server".discord_link_table 
+      SET executed = true 
+      WHERE user_id = $1
+    `, [userId], (err, result) => {
+      if (err) {
+        console.error('Database error marking as executed:', err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Database error', message: err.message }));
+        return;
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, updated: result.rowCount > 0 }));
     });
     return;
   }
