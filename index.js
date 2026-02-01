@@ -219,8 +219,30 @@ client.on('interactionCreate', async interaction => {
           id SERIAL PRIMARY KEY,
           user_id TEXT NOT NULL,
           discord_id TEXT NOT NULL DEFAULT '',
-          token TEXT
+          token TEXT,
+          linked_at TIMESTAMP,
+          executed BOOLEAN DEFAULT false
         )
+      `);
+      
+      // Add columns if they don't exist (for existing tables)
+      await dbPool.query(`
+        DO $$ 
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                         WHERE table_schema = 'rust-server' 
+                         AND table_name = 'discord_link_table' 
+                         AND column_name = 'linked_at') THEN
+            ALTER TABLE "rust-server".discord_link_table ADD COLUMN linked_at TIMESTAMP;
+          END IF;
+          
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                         WHERE table_schema = 'rust-server' 
+                         AND table_name = 'discord_link_table' 
+                         AND column_name = 'executed') THEN
+            ALTER TABLE "rust-server".discord_link_table ADD COLUMN executed BOOLEAN DEFAULT false;
+          END IF;
+        END $$;
       `);
       
       // Grant permissions on the table
@@ -273,7 +295,7 @@ client.on('interactionCreate', async interaction => {
       }
       
       const updateResult = await dbPool.query(
-        'UPDATE "rust-server".discord_link_table SET discord_id = $1, token = NULL WHERE token = $2',
+        'UPDATE "rust-server".discord_link_table SET discord_id = $1, token = NULL, linked_at = NOW() WHERE token = $2',
         [discordUserId, input]
       );
       
@@ -410,8 +432,30 @@ client.once('ready', async () => {
         id SERIAL PRIMARY KEY,
         user_id TEXT NOT NULL,
         discord_id TEXT NOT NULL DEFAULT '',
-        token TEXT
+        token TEXT,
+        linked_at TIMESTAMP,
+        executed BOOLEAN DEFAULT false
       )
+    `);
+    
+    // Add columns if they don't exist (for existing tables)
+    await client.query(`
+      DO $$ 
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                       WHERE table_schema = 'rust-server' 
+                       AND table_name = 'discord_link_table' 
+                       AND column_name = 'linked_at') THEN
+          ALTER TABLE "rust-server".discord_link_table ADD COLUMN linked_at TIMESTAMP;
+        END IF;
+        
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                       WHERE table_schema = 'rust-server' 
+                       AND table_name = 'discord_link_table' 
+                       AND column_name = 'executed') THEN
+          ALTER TABLE "rust-server".discord_link_table ADD COLUMN executed BOOLEAN DEFAULT false;
+        END IF;
+      END $$;
     `);
     
     // Grant permissions on the table
@@ -602,11 +646,69 @@ const httpServer = http.createServer(async (req, res) => {
         }
       }
     });
-  } else {
-    console.log(`📥 404 - Route not found: ${req.url}`);
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not found' }));
+    return;
   }
+
+  // Endpoint to check for recently linked tokens
+  if (req.method === 'GET' && req.url === '/api/check-linked-tokens') {
+    // Check API key
+    const authHeader = req.headers['x-api-key'] || req.headers['authorization'];
+    const providedKey = authHeader?.replace('Bearer ', '') || authHeader;
+    
+    if (!providedKey || providedKey !== apiSecretKey) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized: Invalid API key' }));
+      return;
+    }
+
+    // Query for tokens linked in the last 2 minutes that haven't been executed
+    dbPool.query(`
+      SELECT user_id, token, linked_at 
+      FROM "rust-server".discord_link_table 
+      WHERE linked_at IS NOT NULL 
+      AND linked_at > NOW() - INTERVAL '2 minutes'
+      AND executed = false
+      ORDER BY linked_at DESC
+    `, (err, result) => {
+      if (err) {
+        console.error('Database error checking linked tokens:', err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Database error', message: err.message }));
+        return;
+      }
+
+      const tokens = result.rows.map(row => ({
+        user_id: row.user_id,
+        token: row.token
+      }));
+
+      // Mark as executed if there are tokens
+      if (tokens.length > 0) {
+        const userIds = tokens.map(t => t.user_id);
+        dbPool.query(`
+          UPDATE "rust-server".discord_link_table 
+          SET executed = true 
+          WHERE user_id = ANY($1::text[])
+          AND executed = false
+        `, [userIds], (updateErr) => {
+          if (updateErr) {
+            console.error('Error marking tokens as executed:', updateErr);
+          } else {
+            console.log(`✅ Marked ${tokens.length} token(s) as executed`);
+          }
+        });
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, tokens: tokens }));
+    });
+    return;
+  }
+
+  // 404 for unknown routes
+  console.log(`📥 404 - Route not found: ${req.url}`);
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Not found' }));
   
   // Handle server errors
   req.on('error', (err) => {
