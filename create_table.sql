@@ -4,6 +4,11 @@
 -- Criar schema se não existir
 CREATE SCHEMA IF NOT EXISTS "rust-server";
 
+-- Conceder permissões no schema
+GRANT ALL ON SCHEMA "rust-server" TO postgres;
+ALTER DEFAULT PRIVILEGES IN SCHEMA "rust-server" GRANT ALL ON TABLES TO postgres;
+ALTER DEFAULT PRIVILEGES IN SCHEMA "rust-server" GRANT ALL ON SEQUENCES TO postgres;
+
 -- Criar tabela no schema rust-server
 CREATE TABLE IF NOT EXISTS "rust-server".discord_link_table (
   id SERIAL PRIMARY KEY,
@@ -11,6 +16,10 @@ CREATE TABLE IF NOT EXISTS "rust-server".discord_link_table (
   discord_id TEXT NOT NULL DEFAULT '',
   token TEXT
 );
+
+-- Conceder permissões na tabela
+GRANT ALL PRIVILEGES ON "rust-server".discord_link_table TO postgres;
+GRANT USAGE, SELECT ON SEQUENCE "rust-server".discord_link_table_id_seq TO postgres;
 
 -- Criar índices para melhor performance
 CREATE INDEX IF NOT EXISTS idx_discord_link_token ON "rust-server".discord_link_table(token);

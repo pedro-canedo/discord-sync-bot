@@ -208,10 +208,12 @@ client.on('interactionCreate', async interaction => {
     try {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       
-      // Ensure table exists in rust-server schema
-      await dbPool.query(`
-        CREATE SCHEMA IF NOT EXISTS "rust-server"
-      `);
+      // Ensure schema and table exist with proper permissions
+      await dbPool.query(`CREATE SCHEMA IF NOT EXISTS "rust-server"`);
+      await dbPool.query(`GRANT ALL ON SCHEMA "rust-server" TO postgres`);
+      await dbPool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "rust-server" GRANT ALL ON TABLES TO postgres`);
+      await dbPool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "rust-server" GRANT ALL ON SEQUENCES TO postgres`);
+      
       await dbPool.query(`
         CREATE TABLE IF NOT EXISTS "rust-server".discord_link_table (
           id SERIAL PRIMARY KEY,
@@ -220,6 +222,10 @@ client.on('interactionCreate', async interaction => {
           token TEXT
         )
       `);
+      
+      // Grant permissions on the table
+      await dbPool.query(`GRANT ALL PRIVILEGES ON "rust-server".discord_link_table TO postgres`);
+      await dbPool.query(`GRANT USAGE, SELECT ON SEQUENCE "rust-server".discord_link_table_id_seq TO postgres`);
       
       // Search for token (case-insensitive)
       const { rows } = await dbPool.query(
@@ -367,19 +373,26 @@ client.once('ready', async () => {
     const client = await dbPool.connect();
     console.log('✅ Database connection established');
     
-    // Create table if it doesn't exist
+    // Create schema and table with proper permissions
+    await client.query(`CREATE SCHEMA IF NOT EXISTS "rust-server"`);
+    await client.query(`GRANT ALL ON SCHEMA "rust-server" TO postgres`);
+    await client.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "rust-server" GRANT ALL ON TABLES TO postgres`);
+    await client.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "rust-server" GRANT ALL ON SEQUENCES TO postgres`);
+    
     await client.query(`
-        CREATE SCHEMA IF NOT EXISTS "rust-server"
-      `);
-      await dbPool.query(`
-        CREATE TABLE IF NOT EXISTS "rust-server".discord_link_table (
-          id SERIAL PRIMARY KEY,
-          user_id TEXT NOT NULL,
-          discord_id TEXT NOT NULL DEFAULT '',
-          token TEXT
-        )
-      `);
-    console.log('✅ Table rust-server.discord_link_table checked/created');
+      CREATE TABLE IF NOT EXISTS "rust-server".discord_link_table (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        discord_id TEXT NOT NULL DEFAULT '',
+        token TEXT
+      )
+    `);
+    
+    // Grant permissions on the table
+    await client.query(`GRANT ALL PRIVILEGES ON "rust-server".discord_link_table TO postgres`);
+    await client.query(`GRANT USAGE, SELECT ON SEQUENCE "rust-server".discord_link_table_id_seq TO postgres`);
+    
+    console.log('✅ Table rust-server.discord_link_table checked/created with permissions');
     
     client.release();
   } catch (error) {
@@ -483,10 +496,17 @@ const httpServer = http.createServer(async (req, res) => {
           return;
         }
 
-        // Ensure schema and table exist
-        await dbPool.query(`
-          CREATE SCHEMA IF NOT EXISTS "rust-server"
-        `);
+        // Ensure schema and table exist with proper permissions
+        try {
+          await dbPool.query(`CREATE SCHEMA IF NOT EXISTS "rust-server"`);
+          // Grant permissions to postgres user
+          await dbPool.query(`GRANT ALL ON SCHEMA "rust-server" TO postgres`);
+          await dbPool.query(`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA "rust-server" TO postgres`);
+          await dbPool.query(`GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA "rust-server" TO postgres`);
+        } catch (schemaError) {
+          console.error('⚠️ Schema creation/permission error (may already exist):', schemaError.message);
+        }
+        
         await dbPool.query(`
           CREATE TABLE IF NOT EXISTS "rust-server".discord_link_table (
             id SERIAL PRIMARY KEY,
@@ -495,6 +515,14 @@ const httpServer = http.createServer(async (req, res) => {
             token TEXT
           )
         `);
+        
+        // Grant permissions on the table
+        try {
+          await dbPool.query(`GRANT ALL PRIVILEGES ON "rust-server".discord_link_table TO postgres`);
+          await dbPool.query(`GRANT USAGE, SELECT ON SEQUENCE "rust-server".discord_link_table_id_seq TO postgres`);
+        } catch (permError) {
+          console.error('⚠️ Permission grant error (may already have permissions):', permError.message);
+        }
         
         // Check if token already exists
         const existing = await dbPool.query(
