@@ -225,29 +225,58 @@ client.on('interactionCreate', async interaction => {
         )
       `);
       
-      // Add columns if they don't exist (for existing tables)
-      await dbPool.query(`
-        DO $$ 
-        BEGIN
-          IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                         WHERE table_schema = 'rust-server' 
-                         AND table_name = 'discord_link_table' 
-                         AND column_name = 'linked_at') THEN
-            ALTER TABLE "rust-server".discord_link_table ADD COLUMN linked_at TIMESTAMP;
-          END IF;
-          
-          IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                         WHERE table_schema = 'rust-server' 
-                         AND table_name = 'discord_link_table' 
-                         AND column_name = 'executed') THEN
-            ALTER TABLE "rust-server".discord_link_table ADD COLUMN executed BOOLEAN DEFAULT false;
-          END IF;
-        END $$;
-      `);
+      // Try to alter table ownership to postgres (if we have superuser privileges)
+      try {
+        await dbPool.query(`ALTER TABLE "rust-server".discord_link_table OWNER TO postgres`);
+      } catch (ownerError) {
+        // If we can't change ownership, try to grant all privileges instead
+        // This is expected if we don't have superuser privileges
+      }
       
       // Grant permissions on the table
-      await dbPool.query(`GRANT ALL PRIVILEGES ON "rust-server".discord_link_table TO postgres`);
-      await dbPool.query(`GRANT USAGE, SELECT ON SEQUENCE "rust-server".discord_link_table_id_seq TO postgres`);
+      try {
+        await dbPool.query(`GRANT ALL PRIVILEGES ON "rust-server".discord_link_table TO postgres`);
+        await dbPool.query(`GRANT USAGE, SELECT ON SEQUENCE "rust-server".discord_link_table_id_seq TO postgres`);
+      } catch (grantError) {
+        // Permissions may already be granted
+      }
+      
+      // Add columns if they don't exist (for existing tables)
+      try {
+        await dbPool.query(`
+          DO $$ 
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                           WHERE table_schema = 'rust-server' 
+                           AND table_name = 'discord_link_table' 
+                           AND column_name = 'linked_at') THEN
+              ALTER TABLE "rust-server".discord_link_table ADD COLUMN linked_at TIMESTAMP;
+            END IF;
+            
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                           WHERE table_schema = 'rust-server' 
+                           AND table_name = 'discord_link_table' 
+                           AND column_name = 'executed') THEN
+              ALTER TABLE "rust-server".discord_link_table ADD COLUMN executed BOOLEAN DEFAULT false;
+            END IF;
+          END $$;
+        `);
+      } catch (alterError) {
+        // If we can't alter the table, check if columns already exist
+        const checkColumns = await dbPool.query(`
+          SELECT column_name 
+          FROM information_schema.columns 
+          WHERE table_schema = 'rust-server' 
+          AND table_name = 'discord_link_table'
+          AND column_name IN ('linked_at', 'executed')
+        `);
+        
+        if (checkColumns.rows.length < 2) {
+          console.error('⚠️ Could not add columns to table. You may need to run this SQL manually:');
+          console.error('   ALTER TABLE "rust-server".discord_link_table ADD COLUMN IF NOT EXISTS linked_at TIMESTAMP;');
+          console.error('   ALTER TABLE "rust-server".discord_link_table ADD COLUMN IF NOT EXISTS executed BOOLEAN DEFAULT false;');
+        }
+      }
       
       // Search for token (case-insensitive)
       const { rows } = await dbPool.query(
@@ -438,29 +467,61 @@ client.once('ready', async () => {
       )
     `);
     
-    // Add columns if they don't exist (for existing tables)
-    await client.query(`
-      DO $$ 
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                       WHERE table_schema = 'rust-server' 
-                       AND table_name = 'discord_link_table' 
-                       AND column_name = 'linked_at') THEN
-          ALTER TABLE "rust-server".discord_link_table ADD COLUMN linked_at TIMESTAMP;
-        END IF;
-        
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                       WHERE table_schema = 'rust-server' 
-                       AND table_name = 'discord_link_table' 
-                       AND column_name = 'executed') THEN
-          ALTER TABLE "rust-server".discord_link_table ADD COLUMN executed BOOLEAN DEFAULT false;
-        END IF;
-      END $$;
-    `);
+    // Try to alter table ownership to postgres (if we have superuser privileges)
+    try {
+      await client.query(`ALTER TABLE "rust-server".discord_link_table OWNER TO postgres`);
+    } catch (ownerError) {
+      // If we can't change ownership, try to grant all privileges instead
+      console.log('⚠️ Could not change table ownership, attempting to grant privileges...');
+    }
     
     // Grant permissions on the table
-    await client.query(`GRANT ALL PRIVILEGES ON "rust-server".discord_link_table TO postgres`);
-    await client.query(`GRANT USAGE, SELECT ON SEQUENCE "rust-server".discord_link_table_id_seq TO postgres`);
+    try {
+      await client.query(`GRANT ALL PRIVILEGES ON "rust-server".discord_link_table TO postgres`);
+      await client.query(`GRANT USAGE, SELECT ON SEQUENCE "rust-server".discord_link_table_id_seq TO postgres`);
+    } catch (grantError) {
+      console.log('⚠️ Could not grant privileges (may already have them):', grantError.message);
+    }
+    
+    // Add columns if they don't exist (for existing tables)
+    try {
+      await client.query(`
+        DO $$ 
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                         WHERE table_schema = 'rust-server' 
+                         AND table_name = 'discord_link_table' 
+                         AND column_name = 'linked_at') THEN
+            ALTER TABLE "rust-server".discord_link_table ADD COLUMN linked_at TIMESTAMP;
+          END IF;
+          
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                         WHERE table_schema = 'rust-server' 
+                         AND table_name = 'discord_link_table' 
+                         AND column_name = 'executed') THEN
+            ALTER TABLE "rust-server".discord_link_table ADD COLUMN executed BOOLEAN DEFAULT false;
+          END IF;
+        END $$;
+      `);
+    } catch (alterError) {
+      // If we can't alter the table, check if columns already exist
+      const checkColumns = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_schema = 'rust-server' 
+        AND table_name = 'discord_link_table'
+        AND column_name IN ('linked_at', 'executed')
+      `);
+      
+      if (checkColumns.rows.length < 2) {
+        console.error('❌ Could not add columns to table. You may need to run this SQL manually:');
+        console.error('   ALTER TABLE "rust-server".discord_link_table ADD COLUMN IF NOT EXISTS linked_at TIMESTAMP;');
+        console.error('   ALTER TABLE "rust-server".discord_link_table ADD COLUMN IF NOT EXISTS executed BOOLEAN DEFAULT false;');
+        console.error('   Error:', alterError.message);
+      } else {
+        console.log('✅ Columns already exist or were added successfully');
+      }
+    }
     
     console.log('✅ Table rust-server.discord_link_table checked/created with permissions');
     
