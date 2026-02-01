@@ -401,7 +401,7 @@ const httpServer = http.createServer(async (req, res) => {
   // Enable CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, Authorization');
   
   if (req.method === 'OPTIONS') {
     res.writeHead(200);
@@ -416,9 +416,27 @@ const httpServer = http.createServer(async (req, res) => {
     });
     req.on('end', async () => {
       try {
-        // Check for API secret key in headers
+        console.log(`📥 Received request - Headers:`, JSON.stringify(req.headers, null, 2));
+        console.log(`📥 Request body:`, body);
+        
+        // Parse body first to check for API key in body (fallback)
+        let parsedBody;
+        try {
+          parsedBody = JSON.parse(body);
+        } catch (parseError) {
+          console.error('❌ Failed to parse JSON body:', parseError);
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON in request body' }));
+          return;
+        }
+        
+        // Check for API secret key in headers or body
         const authHeader = req.headers['x-api-key'] || req.headers['authorization'];
-        const providedKey = authHeader?.replace('Bearer ', '') || authHeader;
+        const providedKey = authHeader?.replace('Bearer ', '') || authHeader || parsedBody.api_key;
+        
+        console.log(`🔑 Provided key (header): ${authHeader ? '***' + (authHeader.replace('Bearer ', '') || authHeader).slice(-4) : 'NONE'}`);
+        console.log(`🔑 Provided key (body): ${parsedBody.api_key ? '***' + parsedBody.api_key.slice(-4) : 'NONE'}`);
+        console.log(`🔑 Expected key: ${apiSecretKey ? '***' + apiSecretKey.slice(-4) : 'NOT CONFIGURED'}`);
         
         if (!apiSecretKey) {
           console.error('❌ API_SECRET_KEY not configured in .env');
@@ -429,13 +447,18 @@ const httpServer = http.createServer(async (req, res) => {
         
         if (providedKey !== apiSecretKey) {
           console.error('❌ Invalid API key provided');
+          console.error(`   Expected: ${apiSecretKey}`);
+          console.error(`   Received (header): ${authHeader || 'NONE'}`);
+          console.error(`   Received (body): ${parsedBody.api_key || 'NONE'}`);
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Unauthorized: Invalid API key' }));
           return;
         }
         
+        console.log(`✅ API key validated successfully`);
         console.log(`📥 Received authenticated token insertion request`);
-        const { user_id, token } = JSON.parse(body);
+        
+        const { user_id, token } = parsedBody;
         
         if (!user_id || !token) {
           console.error('❌ Missing user_id or token in request');
@@ -481,8 +504,17 @@ const httpServer = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ success: true, inserted: result.rowCount > 0, id: result.rows[0]?.id }));
       } catch (error) {
         console.error('❌ Error inserting token via API:', error);
+        console.error('❌ Error name:', error.name);
+        console.error('❌ Error message:', error.message);
+        if (error.stack) {
+          console.error('❌ Error stack:', error.stack);
+        }
         res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Internal server error', message: error.message }));
+        res.end(JSON.stringify({ 
+          error: 'Internal server error', 
+          message: error.message,
+          name: error.name
+        }));
       }
     });
   } else {
