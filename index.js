@@ -44,6 +44,7 @@ const parseRconConfigs = () => {
 
 const rconConfigs = parseRconConfigs();
 const groupName = process.env.GROUP_NAME;
+const apiSecretKey = process.env.API_SECRET_KEY;
 
 const dbConfig = {
   host: process.env.DB_HOST,
@@ -415,7 +416,25 @@ const httpServer = http.createServer(async (req, res) => {
     });
     req.on('end', async () => {
       try {
-        console.log(`📥 Received token insertion request: ${body}`);
+        // Check for API secret key in headers
+        const authHeader = req.headers['x-api-key'] || req.headers['authorization'];
+        const providedKey = authHeader?.replace('Bearer ', '') || authHeader;
+        
+        if (!apiSecretKey) {
+          console.error('❌ API_SECRET_KEY not configured in .env');
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Server configuration error' }));
+          return;
+        }
+        
+        if (providedKey !== apiSecretKey) {
+          console.error('❌ Invalid API key provided');
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Unauthorized: Invalid API key' }));
+          return;
+        }
+        
+        console.log(`📥 Received authenticated token insertion request`);
         const { user_id, token } = JSON.parse(body);
         
         if (!user_id || !token) {
