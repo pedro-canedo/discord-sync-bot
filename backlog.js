@@ -12,7 +12,8 @@ const {
 
 const OPEN_API_URL = process.env.OPEN_API_URL || 'https://api.openai.com/v1';
 const OPEN_API_KEY = process.env.OPEN_API_KEY;
-const BACKLOG_WEBHOOK_URL = process.env.BACKLOG_WEBHOOK_URL;
+// Webhook "Lista de Atividades" – backlogs abertos e quadro vão para este canal (podes sobrescrever com BACKLOG_WEBHOOK_URL no .env)
+const BACKLOG_WEBHOOK_URL = process.env.BACKLOG_WEBHOOK_URL || 'https://discord.com/api/webhooks/1476741204657045756/SuPlqEppwNLXl4jAK_pPxWjSo4N54A7943CRpG44YtmurOc0Zzln4An5ed7WgiG8Vjix';
 
 const BUG_MODAL_ID = 'backlog_bug_modal';
 const DATA_DIR = path.join(__dirname, 'data');
