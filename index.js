@@ -1,7 +1,8 @@
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, MessageFlags } = require('discord.js');
-const { Pool } = require('pg');
 const http = require('http');
 require('dotenv').config();
+const db = require('./db');
+const { createBugModal, handleBugModalSubmit, handleBacklogButton, setupBoardInChannel } = require('./backlog');
 
 const client = new Client({
   intents: [
@@ -17,19 +18,6 @@ const guildId = process.env.GUILD_ID;
 
 const apiSecretKey = process.env.API_SECRET_KEY;
 
-const dbConfig = {
-  host: process.env.DB_HOST,
-  database: process.env.DB_DATABASE,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  port: process.env.DB_PORT || 5432,
-  max: 10,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
-};
-
-const dbPool = new Pool(dbConfig);
-
 async function registerCommands() {
   const commands = [
     new SlashCommandBuilder()
@@ -41,6 +29,14 @@ async function registerCommands() {
           .setDescription('The input to link (must be exactly 4 characters)')
           .setRequired(true)
       )
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('bug')
+      .setDescription('Abre um BUG / atividade de backlog (formulário Scrum + lista todo)')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('backlog-board')
+      .setDescription('Cria ou atualiza a mensagem de lista (To Do / In Progress / Completed) neste canal')
       .toJSON(),
   ];
 
@@ -77,7 +73,29 @@ async function registerCommands() {
 }
 
 client.on('interactionCreate', async interaction => {
+  if (interaction.isModalSubmit()) {
+    const handled = await handleBugModalSubmit(interaction, client);
+    if (handled) return;
+  }
+  if (interaction.isButton()) {
+    const handled = await handleBacklogButton(interaction, client);
+    if (handled) return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === 'bug') {
+    const modal = createBugModal();
+    await interaction.showModal(modal);
+    return;
+  }
+
+  if (interaction.commandName === 'backlog-board') {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await setupBoardInChannel(interaction, client);
+    await interaction.editReply({ content: '✅ Quadro de backlog criado/atualizado neste canal.', flags: MessageFlags.Ephemeral });
+    return;
+  }
 
   if (interaction.commandName === 'link') {
     const input = interaction.options.getString('input');
@@ -108,80 +126,12 @@ client.on('interactionCreate', async interaction => {
     
     try {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      
-      // Ensure schema and table exist with proper permissions
-      await dbPool.query(`CREATE SCHEMA IF NOT EXISTS "rust-server"`);
-      await dbPool.query(`GRANT ALL ON SCHEMA "rust-server" TO postgres`);
-      await dbPool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "rust-server" GRANT ALL ON TABLES TO postgres`);
-      await dbPool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "rust-server" GRANT ALL ON SEQUENCES TO postgres`);
-      
-      await dbPool.query(`
-        CREATE TABLE IF NOT EXISTS "rust-server".discord_link_table (
-          id SERIAL PRIMARY KEY,
-          user_id TEXT NOT NULL,
-          discord_id TEXT NOT NULL DEFAULT '',
-          token TEXT,
-          linked_at TIMESTAMP,
-          executed BOOLEAN DEFAULT false
-        )
-      `);
-      
-      // Try to alter table ownership to postgres (if we have superuser privileges)
-      try {
-        await dbPool.query(`ALTER TABLE "rust-server".discord_link_table OWNER TO postgres`);
-      } catch (ownerError) {
-        // If we can't change ownership, try to grant all privileges instead
-        // This is expected if we don't have superuser privileges
-      }
-      
-      // Grant permissions on the table
-      try {
-        await dbPool.query(`GRANT ALL PRIVILEGES ON "rust-server".discord_link_table TO postgres`);
-        await dbPool.query(`GRANT USAGE, SELECT ON SEQUENCE "rust-server".discord_link_table_id_seq TO postgres`);
-      } catch (grantError) {
-        // Permissions may already be granted
-      }
-      
-      // Add columns if they don't exist (for existing tables)
-      try {
-        await dbPool.query(`
-          DO $$ 
-          BEGIN
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                           WHERE table_schema = 'rust-server' 
-                           AND table_name = 'discord_link_table' 
-                           AND column_name = 'linked_at') THEN
-              ALTER TABLE "rust-server".discord_link_table ADD COLUMN linked_at TIMESTAMP;
-            END IF;
-            
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                           WHERE table_schema = 'rust-server' 
-                           AND table_name = 'discord_link_table' 
-                           AND column_name = 'executed') THEN
-              ALTER TABLE "rust-server".discord_link_table ADD COLUMN executed BOOLEAN DEFAULT false;
-            END IF;
-          END $$;
-        `);
-      } catch (alterError) {
-        // If we can't alter the table, check if columns already exist
-        const checkColumns = await dbPool.query(`
-          SELECT column_name 
-          FROM information_schema.columns 
-          WHERE table_schema = 'rust-server' 
-          AND table_name = 'discord_link_table'
-          AND column_name IN ('linked_at', 'executed')
-        `);
-        
-        if (checkColumns.rows.length < 2) {
-          console.error('⚠️ Could not add columns to table. You may need to run this SQL manually:');
-          console.error('   ALTER TABLE "rust-server".discord_link_table ADD COLUMN IF NOT EXISTS linked_at TIMESTAMP;');
-          console.error('   ALTER TABLE "rust-server".discord_link_table ADD COLUMN IF NOT EXISTS executed BOOLEAN DEFAULT false;');
-        }
-      }
-      
+
+      db.init();
+
       // Search for token (case-insensitive)
-      const { rows } = await dbPool.query(
-        'SELECT * FROM "rust-server".discord_link_table WHERE UPPER(token) = UPPER($1)',
+      const { rows } = db.query(
+        'SELECT * FROM discord_link_table WHERE UPPER(token) = UPPER(?)',
         [input]
       );
       
@@ -189,7 +139,7 @@ client.on('interactionCreate', async interaction => {
       
       if (rows.length === 0) {
         // Check if any tokens exist at all for debugging
-        const allTokens = await dbPool.query('SELECT token, user_id, discord_id FROM "rust-server".discord_link_table WHERE token IS NOT NULL ORDER BY id DESC LIMIT 10');
+        const allTokens = db.query('SELECT token, user_id, discord_id FROM discord_link_table WHERE token IS NOT NULL ORDER BY id DESC LIMIT 10');
         console.log(`📋 Recent tokens in database (last 10):`);
         allTokens.rows.forEach(row => {
           console.log(`   - Token: ${row.token}, UserID: ${row.user_id}, DiscordID: ${row.discord_id || 'none'}`);
@@ -212,8 +162,8 @@ client.on('interactionCreate', async interaction => {
         return;
       }
       
-      const { rows: existingLink } = await dbPool.query(
-        'SELECT * FROM "rust-server".discord_link_table WHERE discord_id = $1 AND token != $2',
+      const { rows: existingLink } = db.query(
+        'SELECT * FROM discord_link_table WHERE discord_id = ? AND (token IS NULL OR token != ?)',
         [discordUserId, input]
       );
       
@@ -224,12 +174,13 @@ client.on('interactionCreate', async interaction => {
         return;
       }
       
-      const updateResult = await dbPool.query(
-        'UPDATE "rust-server".discord_link_table SET discord_id = $1, token = NULL, linked_at = NOW() WHERE token = $2',
-        [discordUserId, input]
+      const updateResult = db.run(
+        'UPDATE discord_link_table SET discord_id = ?, token = NULL, linked_at = datetime(\'now\') WHERE UPPER(token) = UPPER(?)',
+        discordUserId,
+        input
       );
-      
-      if (updateResult.rowCount > 0) {
+
+      if (updateResult.changes > 0) {
         try {
           const member = await interaction.guild.members.fetch(discordUserId);
           const role = interaction.guild.roles.cache.find(role => role.name === 'Player Verificado');
@@ -263,19 +214,14 @@ client.on('interactionCreate', async interaction => {
 
 client.on('guildMemberRemove', async (member) => {
   const discordUserId = member.user.id;
-  
+
   try {
-    const { rows: userRows } = await dbPool.query(
-      'SELECT user_id FROM "rust-server".discord_link_table WHERE discord_id = $1',
-      [discordUserId]
+    const result = db.run(
+      'DELETE FROM discord_link_table WHERE discord_id = ?',
+      discordUserId
     );
-    
-    const result = await dbPool.query(
-      'DELETE FROM "rust-server".discord_link_table WHERE discord_id = $1',
-      [discordUserId]
-    );
-    
-    if (result.rowCount > 0) {
+
+    if (result.changes > 0) {
       console.log(`Removed linked account for user ${discordUserId} who left the server.`);
     } else {
       console.log(`User ${discordUserId} left the server but had no linked account.`);
@@ -289,89 +235,12 @@ client.on('guildMemberRemove', async (member) => {
 client.once('ready', async () => {
   console.log(`Bot is ready! Logged in as ${client.user.tag}`);
   registerCommands();
-  
+
   try {
-    const client = await dbPool.connect();
-    console.log('✅ Database connection established');
-    
-    // Create schema and table with proper permissions
-    await client.query(`CREATE SCHEMA IF NOT EXISTS "rust-server"`);
-    await client.query(`GRANT ALL ON SCHEMA "rust-server" TO postgres`);
-    await client.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "rust-server" GRANT ALL ON TABLES TO postgres`);
-    await client.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "rust-server" GRANT ALL ON SEQUENCES TO postgres`);
-    
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS "rust-server".discord_link_table (
-        id SERIAL PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        discord_id TEXT NOT NULL DEFAULT '',
-        token TEXT,
-        linked_at TIMESTAMP,
-        executed BOOLEAN DEFAULT false
-      )
-    `);
-    
-    // Try to alter table ownership to postgres (if we have superuser privileges)
-    try {
-      await client.query(`ALTER TABLE "rust-server".discord_link_table OWNER TO postgres`);
-    } catch (ownerError) {
-      // If we can't change ownership, try to grant all privileges instead
-      console.log('⚠️ Could not change table ownership, attempting to grant privileges...');
-    }
-    
-    // Grant permissions on the table
-    try {
-      await client.query(`GRANT ALL PRIVILEGES ON "rust-server".discord_link_table TO postgres`);
-      await client.query(`GRANT USAGE, SELECT ON SEQUENCE "rust-server".discord_link_table_id_seq TO postgres`);
-    } catch (grantError) {
-      console.log('⚠️ Could not grant privileges (may already have them):', grantError.message);
-    }
-    
-    // Add columns if they don't exist (for existing tables)
-    try {
-      await client.query(`
-        DO $$ 
-        BEGIN
-          IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                         WHERE table_schema = 'rust-server' 
-                         AND table_name = 'discord_link_table' 
-                         AND column_name = 'linked_at') THEN
-            ALTER TABLE "rust-server".discord_link_table ADD COLUMN linked_at TIMESTAMP;
-          END IF;
-          
-          IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                         WHERE table_schema = 'rust-server' 
-                         AND table_name = 'discord_link_table' 
-                         AND column_name = 'executed') THEN
-            ALTER TABLE "rust-server".discord_link_table ADD COLUMN executed BOOLEAN DEFAULT false;
-          END IF;
-        END $$;
-      `);
-    } catch (alterError) {
-      // If we can't alter the table, check if columns already exist
-      const checkColumns = await client.query(`
-        SELECT column_name 
-        FROM information_schema.columns 
-        WHERE table_schema = 'rust-server' 
-        AND table_name = 'discord_link_table'
-        AND column_name IN ('linked_at', 'executed')
-      `);
-      
-      if (checkColumns.rows.length < 2) {
-        console.error('❌ Could not add columns to table. You may need to run this SQL manually:');
-        console.error('   ALTER TABLE "rust-server".discord_link_table ADD COLUMN IF NOT EXISTS linked_at TIMESTAMP;');
-        console.error('   ALTER TABLE "rust-server".discord_link_table ADD COLUMN IF NOT EXISTS executed BOOLEAN DEFAULT false;');
-        console.error('   Error:', alterError.message);
-      } else {
-        console.log('✅ Columns already exist or were added successfully');
-      }
-    }
-    
-    console.log('✅ Table rust-server.discord_link_table checked/created with permissions');
-    
-    client.release();
+    db.init();
+    console.log('✅ Base de dados SQLite pronta:', db.getDbPath());
   } catch (error) {
-    console.error('❌ Database connection failed:', error.message);
+    console.error('❌ Erro ao inicializar base de dados:', error.message);
   }
 });
 
@@ -462,56 +331,28 @@ const httpServer = http.createServer(async (req, res) => {
           return;
         }
 
-        // Ensure schema and table exist with proper permissions
-        try {
-          await dbPool.query(`CREATE SCHEMA IF NOT EXISTS "rust-server"`);
-          // Grant permissions to postgres user
-          await dbPool.query(`GRANT ALL ON SCHEMA "rust-server" TO postgres`);
-          await dbPool.query(`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA "rust-server" TO postgres`);
-          await dbPool.query(`GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA "rust-server" TO postgres`);
-        } catch (schemaError) {
-          console.error('⚠️ Schema creation/permission error (may already exist):', schemaError.message);
-        }
-        
-        await dbPool.query(`
-          CREATE TABLE IF NOT EXISTS "rust-server".discord_link_table (
-            id SERIAL PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            discord_id TEXT NOT NULL DEFAULT '',
-            token TEXT
-          )
-        `);
-        
-        // Grant permissions on the table
-        try {
-          await dbPool.query(`GRANT ALL PRIVILEGES ON "rust-server".discord_link_table TO postgres`);
-          await dbPool.query(`GRANT USAGE, SELECT ON SEQUENCE "rust-server".discord_link_table_id_seq TO postgres`);
-        } catch (permError) {
-          console.error('⚠️ Permission grant error (may already have permissions):', permError.message);
-        }
-        
+        db.init();
+
         // Check if token already exists
-        const existing = await dbPool.query(
-          'SELECT * FROM "rust-server".discord_link_table WHERE token = $1',
-          [token]
-        );
-        
-        if (existing.rows.length > 0) {
+        const existing = db.get('SELECT * FROM discord_link_table WHERE token = ?', token);
+
+        if (existing) {
           console.log(`⚠️ Token ${token} already exists in database`);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true, inserted: false, message: 'Token already exists' }));
           return;
         }
-        
+
         // Insert token into database
-        const result = await dbPool.query(
-          'INSERT INTO "rust-server".discord_link_table (user_id, token) VALUES ($1, $2) RETURNING id',
-          [user_id, token]
+        const result = db.run(
+          'INSERT INTO discord_link_table (user_id, token) VALUES (?, ?)',
+          user_id,
+          token
         );
 
         console.log(`✅ Token ${token} inserted for user ${user_id}`);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, inserted: result.rowCount > 0, id: result.rows[0]?.id }));
+        res.end(JSON.stringify({ success: true, inserted: result.changes > 0, id: result.lastInsertRowid }));
       } catch (error) {
         console.error('❌ ========== ERROR ==========');
         console.error('❌ Error type:', error.constructor.name);
@@ -557,47 +398,42 @@ const httpServer = http.createServer(async (req, res) => {
       return;
     }
 
-    // Query for tokens linked in the last 2 minutes that haven't been executed
-    dbPool.query(`
-      SELECT user_id, token, linked_at 
-      FROM "rust-server".discord_link_table 
-      WHERE linked_at IS NOT NULL 
-      AND linked_at > NOW() - INTERVAL '2 minutes'
-      AND executed = false
-      ORDER BY linked_at DESC
-    `, (err, result) => {
-      if (err) {
-        console.error('Database error checking linked tokens:', err);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Database error', message: err.message }));
-        return;
-      }
+    try {
+      // Query for tokens linked in the last 2 minutes that haven't been executed
+      const rows = db.all(`
+        SELECT user_id, token, linked_at
+        FROM discord_link_table
+        WHERE linked_at IS NOT NULL
+        AND linked_at > datetime('now', '-2 minutes')
+        AND executed = 0
+        ORDER BY linked_at DESC
+      `);
 
-      const tokens = result.rows.map(row => ({
+      const tokens = rows.map(row => ({
         user_id: row.user_id,
         token: row.token
       }));
 
       // Mark as executed if there are tokens
       if (tokens.length > 0) {
+        const placeholders = tokens.map(() => '?').join(',');
         const userIds = tokens.map(t => t.user_id);
-        dbPool.query(`
-          UPDATE "rust-server".discord_link_table 
-          SET executed = true 
-          WHERE user_id = ANY($1::text[])
-          AND executed = false
-        `, [userIds], (updateErr) => {
-          if (updateErr) {
-            console.error('Error marking tokens as executed:', updateErr);
-          } else {
-            console.log(`✅ Marked ${tokens.length} token(s) as executed`);
-          }
-        });
+        db.run(`
+          UPDATE discord_link_table
+          SET executed = 1
+          WHERE user_id IN (${placeholders})
+          AND executed = 0
+        `, ...userIds);
+        console.log(`✅ Marked ${tokens.length} token(s) as executed`);
       }
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, tokens: tokens }));
-    });
+    } catch (err) {
+      console.error('Database error checking linked tokens:', err);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Database error', message: err.message }));
+    }
     return;
   }
 
@@ -622,39 +458,36 @@ const httpServer = http.createServer(async (req, res) => {
       return;
     }
 
-    // Query for linked account
-    dbPool.query(`
-      SELECT user_id, discord_id, linked_at, executed
-      FROM "rust-server".discord_link_table 
-      WHERE user_id = $1 
-      AND discord_id IS NOT NULL 
-      AND discord_id != ''
-      AND linked_at IS NOT NULL
-    `, [userId], (err, result) => {
-      if (err) {
-        console.error('Database error checking link:', err);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Database error', message: err.message }));
-        return;
-      }
+    try {
+      const linkData = db.get(`
+        SELECT user_id, discord_id, linked_at, executed
+        FROM discord_link_table
+        WHERE user_id = ?
+        AND discord_id IS NOT NULL
+        AND discord_id != ''
+        AND linked_at IS NOT NULL
+      `, userId);
 
-      if (result.rows.length === 0) {
+      if (!linkData) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, linked: false, message: 'Account not linked yet' }));
         return;
       }
 
-      const linkData = result.rows[0];
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ 
-        success: true, 
+      res.end(JSON.stringify({
+        success: true,
         linked: true,
         user_id: linkData.user_id,
         discord_id: linkData.discord_id,
         linked_at: linkData.linked_at,
         executed: linkData.executed
       }));
-    });
+    } catch (err) {
+      console.error('Database error checking link:', err);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Database error', message: err.message }));
+    }
     return;
   }
 
@@ -681,24 +514,22 @@ const httpServer = http.createServer(async (req, res) => {
       return;
     }
 
-    // Mark as executed (update all records for this user_id)
-    dbPool.query(`
-      UPDATE "rust-server".discord_link_table 
-      SET executed = true 
-      WHERE user_id = $1
-      AND executed = false
-    `, [userId], (err, result) => {
-      if (err) {
-        console.error('Database error marking as executed:', err);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Database error', message: err.message }));
-        return;
-      }
+    try {
+      const result = db.run(`
+        UPDATE discord_link_table
+        SET executed = 1
+        WHERE user_id = ?
+        AND executed = 0
+      `, userId);
 
-      console.log(`✅ Marked ${result.rowCount} record(s) as executed for user ${userId}`);
+      console.log(`✅ Marked ${result.changes} record(s) as executed for user ${userId}`);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, updated: result.rowCount > 0 }));
-    });
+      res.end(JSON.stringify({ success: true, updated: result.changes > 0 }));
+    } catch (err) {
+      console.error('Database error marking as executed:', err);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Database error', message: err.message }));
+    }
     return;
   }
 

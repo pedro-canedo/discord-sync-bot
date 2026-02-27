@@ -8,8 +8,9 @@ A Discord bot that syncs Discord accounts with game server accounts (Rust) via R
 - 🎮 **RCON Integration**: Automatically manages user groups on Rust game servers via RCON
 - 👥 **Role Management**: Automatically assigns "Player Verificado" role to verified users
 - 🔧 **Multi-Server Support**: Connect to multiple RCON servers simultaneously
-- 🗄️ **Database Integration**: Stores and manages account links in MySQL database
+- 🗄️ **Base de dados local**: Armazena os links de contas em SQLite (um ficheiro na pasta `data/`), ideal para Coolify e self-hosting
 - 🚪 **Auto Cleanup**: Removes user groups when members leave the Discord server
+- 📋 **Backlog / BUG**: Comando `/bug` para abrir atividades no formato Scrum (perguntas padrão + refinamento com IA). Lista todo (To Do / In Progress / Completed) atualizada automaticamente; suporte a webhook para enviar backlog a um canal.
 
 ## Prerequisites
 
@@ -17,7 +18,7 @@ Before setting up the bot, make sure you have:
 
 - **Node.js** (v16 or higher recommended)
 - **npm** (comes with Node.js)
-- **PostgreSQL** database server
+- Nenhum servidor de base de dados externo (usa SQLite local)
 - **Discord Bot Token** (from Discord Developer Portal)
 - **RCON Access** to your Rust game server(s)
 - A Discord server where you have administrator permissions
@@ -36,7 +37,7 @@ Before setting up the bot, make sure you have:
 
 3. **Create a `.env` file** in the root directory (see Configuration section below)
 
-4. **Set up your MySQL database** (see Database Setup section below)
+4. **Opcional:** Definir `DB_PATH` no `.env` para outro caminho do ficheiro SQLite (por predefinição: `data/discord-sync.db`)
 
 5. **Configure your Discord bot** (see Discord Bot Setup section below)
 
@@ -57,14 +58,20 @@ DISCORD_TOKEN=your_discord_bot_token_here
 CLIENT_ID=your_discord_bot_client_id_here
 GUILD_ID=your_discord_server_id_here
 
-# Database Configuration
-DB_HOST=localhost
-DB_DATABASE=your_database_name
-DB_USER=your_database_user
-DB_PASSWORD=your_database_password
+# Base de dados (opcional – SQLite local por predefinição)
+# DB_PATH=data/discord-sync.db
 
 # Oxide User Group (automatically assigned when users link)
 GROUP_NAME=your_group_name
+```
+
+### Optional – Backlog / BUG tracking
+
+```env
+OPEN_API_KEY=sk-...              # Chave OpenAI para refinar textos no formato Scrum
+OPEN_API_URL=https://api.openai.com/v1
+BACKLOG_CHANNEL_ID=             # ID do canal onde publicar atividades (vazio = mesmo canal do comando)
+BACKLOG_WEBHOOK_URL=            # URL do webhook Discord para enviar lista + novos bugs a um canal
 ```
 
 ### Required Variables choose SINGLE SERVER / MULTI SERVER
@@ -98,12 +105,7 @@ DISCORD_TOKEN=your_discord_bot_token_here
 CLIENT_ID=your_discord_bot_client_id_here
 GUILD_ID=your_discord_server_id_here
 
-# Database Configuration (PostgreSQL)
-DB_HOST=72.60.250.76
-DB_PORT=5432
-DB_DATABASE=postgres
-DB_USER=postgres
-DB_PASSWORD=zO91TtiMVHNO9h731kFNtxz7eobBarhW
+# Base de dados: SQLite local (ficheiro em data/discord-sync.db). Opcional: DB_PATH=/caminho/para/db.sqlite
 
 # Oxide User Group (automatically assigned when users link)
 GROUP_NAME=your_group_name
@@ -200,12 +202,10 @@ Links your Discord account to a game account using a 4-character token.
 - ✅ Verify Node.js version: `node --version` (should be v16+)
 - ✅ Check that dependencies are installed: `npm install`
 
-### Database connection fails
-- ✅ Verify database credentials in `.env`
-- ✅ Ensure PostgreSQL server is running
-- ✅ Check that the database and table exist
-- ✅ Verify database user has proper permissions
-- ✅ Check firewall settings if connecting to remote PostgreSQL server
+### Erro na base de dados
+- ✅ A pasta `data/` é criada automaticamente; verifica permissões de escrita
+- ✅ Se usares `DB_PATH`, confirma que o caminho existe e é gravável
+- ✅ No **Coolify**: monta um volume em `data/` para persistir o ficheiro SQLite entre deploys
 
 ### RCON connection fails
 - ✅ Verify RCON credentials in `.env`
